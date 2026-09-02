@@ -95,6 +95,23 @@
       h1{letter-spacing:-1px}
     }
 
+
+    /* ===== BizSolve problems prototype ===== */
+    .problem-modal{display:none;position:fixed;inset:0;z-index:110;background:rgba(2,6,23,.65);padding:20px;overflow:auto}
+    .problem-modal.show{display:grid;place-items:center}
+    .problem-box{width:min(680px,100%);background:#fff;border-radius:22px;padding:30px;box-shadow:0 30px 80px rgba(2,6,23,.3);position:relative}
+    .problem-close{position:absolute;right:18px;top:14px;background:#f1f5f9;border:0;width:38px;height:38px;border-radius:50%;font-size:1.3rem}
+    .problem-form textarea{margin-bottom:13px}
+    .problem-form select{width:100%;padding:14px;border:1px solid var(--border);border-radius:10px;font:inherit;margin-top:7px;margin-bottom:17px;background:#fff}
+    .problem-list{display:grid;gap:14px;margin-top:18px}
+    .problem-item{border:1px solid var(--border);border-radius:14px;padding:18px;background:#fff}
+    .problem-item h3{margin-bottom:5px}
+    .problem-item p{color:var(--muted);margin-bottom:10px}
+    .problem-meta{display:flex;gap:8px;flex-wrap:wrap;font-size:.85rem}
+    .problem-tag{background:#eff6ff;color:#1d4ed8;padding:5px 9px;border-radius:999px;font-weight:700}
+    .empty-state{padding:20px;border:1px dashed var(--border);border-radius:14px;color:var(--muted);text-align:center;margin-top:18px}
+    .success-notice{display:none;margin-top:12px;padding:10px 12px;border-radius:9px;background:#dcfce7;color:#166534;font-weight:700}
+
     /* ===== BizSolve account prototype ===== */
     .auth-modal{display:none;position:fixed;inset:0;z-index:100;background:rgba(2,6,23,.65);padding:20px;overflow:auto}
     .auth-modal.show{display:grid;place-items:center}
@@ -398,6 +415,7 @@
 
       document.getElementById('ownerDashboard').style.display = user.role === 'owner' ? 'grid' : 'none';
       document.getElementById('solverDashboard').style.display = user.role === 'solver' ? 'grid' : 'none';
+      renderProblems();
     }
 
     function closeDashboard(){
@@ -423,6 +441,103 @@
         if(el){ el.textContent=''; el.style.display='none'; }
       });
     }
+
+
+    function getProblems(){
+      try { return JSON.parse(localStorage.getItem('bizsolve_problems') || '[]'); }
+      catch(e){ return []; }
+    }
+
+    function saveProblems(problems){
+      localStorage.setItem('bizsolve_problems', JSON.stringify(problems));
+    }
+
+    function openProblemModal(){
+      if(!currentUser()) { openAuth('signup'); return; }
+      document.getElementById('problemModal').classList.add('show');
+      document.getElementById('problemNotice').style.display = 'none';
+      document.getElementById('problemTitleInput').focus();
+    }
+
+    function closeProblemModal(){
+      document.getElementById('problemModal').classList.remove('show');
+      document.querySelector('.problem-form').reset();
+      document.getElementById('problemNotice').style.display = 'none';
+    }
+
+    function createProblem(event){
+      event.preventDefault();
+      const user = currentUser();
+      if(!user) return;
+
+      const problem = {
+        id: Date.now().toString(),
+        ownerId: user.id,
+        ownerName: user.name,
+        title: document.getElementById('problemTitleInput').value.trim(),
+        category: document.getElementById('problemCategory').value,
+        description: document.getElementById('problemDescription').value.trim(),
+        status: 'Open',
+        createdAt: new Date().toISOString()
+      };
+
+      const problems = getProblems();
+      problems.unshift(problem);
+      saveProblems(problems);
+
+      const notice = document.getElementById('problemNotice');
+      notice.textContent = 'Problem published successfully.';
+      notice.style.display = 'block';
+
+      setTimeout(() => {
+        closeProblemModal();
+        renderProblems();
+      }, 600);
+    }
+
+    function renderProblems(){
+      const problems = getProblems();
+      const user = currentUser();
+
+      const ownerBox = document.getElementById('ownerProblems');
+      const solverBox = document.getElementById('solverProblems');
+      if(!ownerBox || !solverBox) return;
+
+      const mine = user ? problems.filter(p => p.ownerId === user.id) : [];
+
+      ownerBox.innerHTML = mine.length
+        ? mine.map(problemCard).join('')
+        : '<div class="empty-state">You have not posted any problems yet.</div>';
+
+      solverBox.innerHTML = problems.length
+        ? problems.map(problemCard).join('')
+        : '<div class="empty-state">No business problems have been published yet.</div>';
+    }
+
+    function problemCard(problem){
+      const date = new Date(problem.createdAt).toLocaleDateString();
+      return `
+        <article class="problem-item">
+          <h3>${escapeHtml(problem.title)}</h3>
+          <p>${escapeHtml(problem.description)}</p>
+          <div class="problem-meta">
+            <span class="problem-tag">${escapeHtml(problem.category)}</span>
+            <span class="problem-tag">${escapeHtml(problem.status)}</span>
+            <span class="problem-tag">Posted ${escapeHtml(date)}</span>
+          </div>
+        </article>
+      `;
+    }
+
+    function escapeHtml(value){
+      return String(value).replace(/[&<>"']/g, char => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'
+      }[char]));
+    }
+
+    document.getElementById('problemModal').addEventListener('click', function(e){
+      if(e.target === this) closeProblemModal();
+    });
 
     function demoFeature(feature){
       alert(feature + ' is the next feature we will connect to the database.');
@@ -517,20 +632,21 @@
       <div id="ownerDashboard" class="dash-grid">
         <div class="dash-card">
           <h2>📝 Post a Business Problem</h2>
-          <p>Next step: describe a challenge and let qualified solvers find it.</p>
-          <button class="btn btn-primary" style="margin-top:18px;" type="button" onclick="demoFeature('Problem posting')">Post a Problem</button>
+          <p>Describe a challenge and publish it for problem solvers to discover.</p>
+          <button class="btn btn-primary" style="margin-top:18px;" type="button" onclick="openProblemModal()">Post a Problem</button>
         </div>
         <div class="dash-card">
           <h2>📋 My Problems</h2>
-          <p>Your future dashboard will show the problems you post and the solutions you receive.</p>
+          <p>Problems you publish will appear here.</p>
+          <div id="ownerProblems" class="problem-list"></div>
         </div>
       </div>
 
       <div id="solverDashboard" class="dash-grid" style="display:none;">
-        <div class="dash-card">
+        <div class="dash-card" style="grid-column:1/-1;">
           <h2>🔎 Find Business Problems</h2>
-          <p>Next step: browse problems that match your skills and interests.</p>
-          <button class="btn btn-primary" style="margin-top:18px;" type="button" onclick="demoFeature('Problem browsing')">Browse Problems</button>
+          <p>Browse published problems and choose one that matches your skills.</p>
+          <div id="solverProblems" class="problem-list"></div>
         </div>
         <div class="dash-card">
           <h2>💡 My Solutions</h2>
