@@ -129,6 +129,7 @@
     .auth-form{display:none}
     .auth-form.active{display:block}
     .auth-form input{margin-bottom:13px}
+    .verify-code-banner{background:#eff6ff;border:1px dashed #93c5fd;color:#1d4ed8;padding:12px 14px;border-radius:10px;font-weight:700;margin-bottom:16px;text-align:center}
     .auth-actions{display:flex;gap:10px;align-items:center;justify-content:space-between;margin-top:8px}
     .auth-switch{text-align:center;margin-top:18px;color:var(--muted);font-size:.95rem}
     .text-btn{background:none;border:0;color:var(--blue);font-weight:700;padding:0;cursor:pointer}
@@ -277,15 +278,31 @@
 </footer>
 
   <script>
-    let selectedRole = 'owner';
+    // ⚠️ Update this after you deploy the backend from the /api folder (e.g. to Render).
+    const API_BASE_URL = 'https://YOUR-BACKEND-URL.onrender.com';
 
-    function getUsers(){
-      try { return JSON.parse(localStorage.getItem('bizsolve_users') || '[]'); }
-      catch(e){ return []; }
+    let selectedRole = 'owner';
+    let pendingVerifyEmail = null;
+
+    function getToken(){ return localStorage.getItem('bizsolve_token'); }
+
+    function getCachedUser(){
+      try { return JSON.parse(localStorage.getItem('bizsolve_user') || 'null'); }
+      catch(e){ return null; }
     }
 
-    function saveUsers(users){
-      localStorage.setItem('bizsolve_users', JSON.stringify(users));
+    function setSession(token, user){
+      localStorage.setItem('bizsolve_token', token);
+      localStorage.setItem('bizsolve_user', JSON.stringify(user));
+    }
+
+    function clearSession(){
+      localStorage.removeItem('bizsolve_token');
+      localStorage.removeItem('bizsolve_user');
+    }
+
+    function currentUser(){
+      return getCachedUser();
     }
 
     function openAuth(mode='signup', role=null){
@@ -303,12 +320,14 @@
     function showSignup(){
       document.getElementById('signupView').style.display = 'block';
       document.getElementById('loginView').style.display = 'none';
+      document.getElementById('verifyView').style.display = 'none';
       clearNotices();
     }
 
     function showLogin(){
       document.getElementById('signupView').style.display = 'none';
       document.getElementById('loginView').style.display = 'block';
+      document.getElementById('verifyView').style.display = 'none';
       clearNotices();
     }
 
@@ -318,10 +337,60 @@
       document.getElementById('solverRole').classList.toggle('selected', role === 'solver');
     }
 
-    async function hashPassword(password){
-      const data = new TextEncoder().encode(password);
-      const hash = await crypto.subtle.digest('SHA-256', data);
-      return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2,'0')).join('');
+    async function apiPost(path, body){
+      const res = await fetch(`${API_BASE_URL}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      const data = await res.json().catch(() => ({}));
+      return { ok: res.ok, status: res.status, data };
+    }
+
+    function beginVerification(email){
+      pendingVerifyEmail = email;
+      document.getElementById('signupView').style.display = 'none';
+      document.getElementById('loginView').style.display = 'none';
+      document.getElementById('verifyView').style.display = 'block';
+      document.getElementById('verifyEmailLabel').textContent = email;
+      document.getElementById('verifyCodeInput').value = '';
+      clearNotices();
+      document.getElementById('authModal').classList.add('show');
+    }
+
+    async function resendVerification(){
+      if(!pendingVerifyEmail) return;
+      const { ok, data } = await apiPost('/api/resend-code', { email: pendingVerifyEmail });
+      showNotice('verifyNotice', ok ? 'A new code has been sent.' : (data.error || 'Could not resend the code.'));
+    }
+
+    function cancelVerification(){
+      pendingVerifyEmail = null;
+      showSignup();
+    }
+
+    async function verifyEmail(event){
+      event.preventDefault();
+      if(!pendingVerifyEmail){
+        showNotice('verifyNotice','Something went wrong. Please sign up again.');
+        return;
+      }
+      const code = document.getElementById('verifyCodeInput').value.trim();
+
+      try {
+        const { ok, data } = await apiPost('/api/verify', { email: pendingVerifyEmail, code });
+        if(!ok){
+          showNotice('verifyNotice', data.error || 'Could not verify. Please try again.');
+          return;
+        }
+        setSession(data.token, data.user);
+        pendingVerifyEmail = null;
+        closeAuth();
+        updateAccountUI();
+        openDashboard();
+      } catch (err) {
+        showNotice('verifyNotice','Could not reach the server. Please try again.');
+      }
     }
 
     async function signup(event){
@@ -335,51 +404,44 @@
         return;
       }
 
-      const users = getUsers();
-      if(users.some(u => u.email === email)){
-        showNotice('signupNotice','An account with this email already exists. Try logging in.');
-        return;
+      try {
+        const { ok, data } = await apiPost('/api/signup', { name, email, password, role: selectedRole });
+        if(!ok){
+          showNotice('signupNotice', data.error || 'Something went wrong. Please try again.');
+          return;
+        }
+        beginVerification(email);
+      } catch (err) {
+        showNotice('signupNotice','Could not reach the server. Please try again.');
       }
-
-      const passwordHash = await hashPassword(password);
-      const user = {
-        id: Date.now().toString(),
-        name,
-        email,
-        role: selectedRole,
-        passwordHash,
-        createdAt: new Date().toISOString()
-      };
-
-      users.push(user);
-      saveUsers(users);
-      localStorage.setItem('bizsolve_current_user', user.id);
-      closeAuth();
-      updateAccountUI();
-      openDashboard();
     }
 
     async function login(event){
       event.preventDefault();
       const email = document.getElementById('loginEmail').value.trim().toLowerCase();
       const password = document.getElementById('loginPassword').value;
-      const passwordHash = await hashPassword(password);
-      const user = getUsers().find(u => u.email === email && u.passwordHash === passwordHash);
 
-      if(!user){
-        showNotice('loginNotice','Email or password is incorrect.');
-        return;
+      try {
+        const { ok, status, data } = await apiPost('/api/login', { email, password });
+
+        if(status === 403 && data.needsVerification){
+          await apiPost('/api/resend-code', { email });
+          beginVerification(email);
+          showNotice('verifyNotice','Please verify your email to continue.');
+          return;
+        }
+        if(!ok){
+          showNotice('loginNotice', data.error || 'Email or password is incorrect.');
+          return;
+        }
+
+        setSession(data.token, data.user);
+        closeAuth();
+        updateAccountUI();
+        openDashboard();
+      } catch (err) {
+        showNotice('loginNotice','Could not reach the server. Please try again.');
       }
-
-      localStorage.setItem('bizsolve_current_user', user.id);
-      closeAuth();
-      updateAccountUI();
-      openDashboard();
-    }
-
-    function currentUser(){
-      const id = localStorage.getItem('bizsolve_current_user');
-      return getUsers().find(u => u.id === id) || null;
     }
 
     function updateAccountUI(){
@@ -400,8 +462,7 @@
     function openDashboard(){
       const user = currentUser();
       if(!user){ openAuth('signup'); return; }
-
-      document.getElementById('dashboard').classList.add('show');
+      if(!user.verified){ apiPost('/api/resend-code', { email: user.email }); beginVerification(user.email); return; }
       document.body.style.overflow = 'hidden';
 
       const roleName = user.role === 'owner' ? 'Business Owner' : 'Problem Solver';
@@ -424,7 +485,7 @@
     }
 
     function logout(){
-      localStorage.removeItem('bizsolve_current_user');
+      clearSession();
       closeDashboard();
       updateAccountUI();
     }
@@ -436,7 +497,7 @@
     }
 
     function clearNotices(){
-      ['signupNotice','loginNotice'].forEach(id => {
+      ['signupNotice','loginNotice','verifyNotice'].forEach(id => {
         const el = document.getElementById(id);
         if(el){ el.textContent=''; el.style.display='none'; }
       });
@@ -453,7 +514,9 @@
     }
 
     function openProblemModal(){
-      if(!currentUser()) { openAuth('signup'); return; }
+      const user = currentUser();
+      if(!user) { openAuth('signup'); return; }
+      if(!user.verified){ apiPost('/api/resend-code', { email: user.email }); beginVerification(user.email); return; }
       document.getElementById('problemModal').classList.add('show');
       document.getElementById('problemNotice').style.display = 'none';
       document.getElementById('problemTitleInput').focus();
@@ -506,16 +569,19 @@
       const mine = user ? problems.filter(p => p.ownerId === user.id) : [];
 
       ownerBox.innerHTML = mine.length
-        ? mine.map(problemCard).join('')
+        ? mine.map(p => problemCard(p)).join('')
         : '<div class="empty-state">You have not posted any problems yet.</div>';
 
       solverBox.innerHTML = problems.length
-        ? problems.map(problemCard).join('')
+        ? problems.map(p => problemCard(p, { viewable: true })).join('')
         : '<div class="empty-state">No business problems have been published yet.</div>';
     }
 
-    function problemCard(problem){
+    function problemCard(problem, opts = {}){
       const date = new Date(problem.createdAt).toLocaleDateString();
+      const viewBtn = opts.viewable
+        ? `<button class="btn btn-outline" style="margin-top:12px;" type="button" onclick="viewProblem('${problem.id}')">View Full Problem</button>`
+        : '';
       return `
         <article class="problem-item">
           <h3>${escapeHtml(problem.title)}</h3>
@@ -525,8 +591,51 @@
             <span class="problem-tag">${escapeHtml(problem.status)}</span>
             <span class="problem-tag">Posted ${escapeHtml(date)}</span>
           </div>
+          ${viewBtn}
         </article>
       `;
+    }
+
+    function viewProblem(id){
+      const problem = getProblems().find(p => p.id === id);
+      if(!problem) return;
+      const user = currentUser();
+
+      document.getElementById('problemDetailTitle').textContent = problem.title;
+      document.getElementById('detailCategoryTag').textContent = problem.category;
+      document.getElementById('detailOwnerName').textContent = problem.ownerName;
+      document.getElementById('detailDate').textContent = new Date(problem.createdAt).toLocaleDateString();
+      document.getElementById('detailDescription').textContent = problem.description;
+
+      const gate = document.getElementById('detailVerifyNotice');
+      const interestBtn = document.getElementById('detailInterestBtn');
+      document.getElementById('detailInterestNotice').style.display = 'none';
+
+      if(!user){
+        gate.style.display = 'block';
+        gate.textContent = 'Log in as a Problem Solver to respond to this problem.';
+        interestBtn.style.display = 'none';
+      } else if(!user.verified){
+        gate.style.display = 'block';
+        gate.textContent = 'Verify your email address to respond to this problem.';
+        interestBtn.style.display = 'none';
+      } else {
+        gate.style.display = 'none';
+        interestBtn.style.display = 'inline-block';
+        interestBtn.dataset.problemId = problem.id;
+      }
+
+      document.getElementById('problemDetailModal').classList.add('show');
+    }
+
+    function closeProblemDetail(){
+      document.getElementById('problemDetailModal').classList.remove('show');
+    }
+
+    function expressInterest(){
+      const notice = document.getElementById('detailInterestNotice');
+      notice.textContent = 'Interest sent! The business owner will be notified. (Messaging is a future feature.)';
+      notice.style.display = 'block';
     }
 
     function escapeHtml(value){
@@ -537,6 +646,10 @@
 
     document.getElementById('problemModal').addEventListener('click', function(e){
       if(e.target === this) closeProblemModal();
+    });
+
+    document.getElementById('problemDetailModal').addEventListener('click', function(e){
+      if(e.target === this) closeProblemDetail();
     });
 
     function demoFeature(feature){
@@ -550,6 +663,49 @@
     // Restore the session when the page is opened again.
     updateAccountUI();
   </script>
+
+<!-- ===== BizSolve Problem Posting Prototype UI ===== -->
+  <div id="problemModal" class="problem-modal" role="dialog" aria-modal="true" aria-labelledby="problemModalTitle">
+    <div class="problem-box">
+      <button class="problem-close" type="button" aria-label="Close" onclick="closeProblemModal()">×</button>
+      <h2 id="problemModalTitle">Post a Business Problem</h2>
+      <p class="auth-sub">Describe your challenge so problem solvers can understand it and offer real help.</p>
+      <form class="problem-form" onsubmit="createProblem(event)">
+        <label for="problemTitleInput">Problem Title</label>
+        <input id="problemTitleInput" type="text" placeholder="e.g. Low customer retention" required>
+
+        <label for="problemCategory">Category</label>
+        <select id="problemCategory" required>
+          <option value="" disabled selected>Choose a category</option>
+          <option>Sales & Growth</option>
+          <option>Marketing</option>
+          <option>Operations</option>
+          <option>Customer Experience</option>
+          <option>Strategy</option>
+          <option>Other</option>
+        </select>
+
+        <label for="problemDescription">Describe the Problem</label>
+        <textarea id="problemDescription" placeholder="What's happening, how long has it been going on, and what have you already tried?" required></textarea>
+
+        <button class="btn btn-primary" style="width:100%;" type="submit">Publish Problem</button>
+        <div id="problemNotice" class="success-notice"></div>
+      </form>
+    </div>
+  </div>
+
+  <div id="problemDetailModal" class="problem-modal" role="dialog" aria-modal="true" aria-labelledby="problemDetailTitle">
+    <div class="problem-box">
+      <button class="problem-close" type="button" aria-label="Close" onclick="closeProblemDetail()">×</button>
+      <span id="detailCategoryTag" class="problem-tag" style="display:inline-block;margin-bottom:12px;"></span>
+      <h2 id="problemDetailTitle"></h2>
+      <p style="color:var(--muted);margin:6px 0 16px;">Posted by <strong id="detailOwnerName"></strong> on <span id="detailDate"></span></p>
+      <p id="detailDescription" style="margin-bottom:20px;"></p>
+      <div id="detailVerifyNotice" class="empty-state" style="display:none;margin-top:0;margin-bottom:16px;"></div>
+      <button id="detailInterestBtn" class="btn btn-primary" type="button" onclick="expressInterest()">I Can Help With This</button>
+      <div id="detailInterestNotice" class="success-notice"></div>
+    </div>
+  </div>
 
 <!-- ===== BizSolve Account Prototype UI ===== -->
   <div id="authModal" class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="authTitle">
@@ -609,6 +765,25 @@
           <button class="text-btn" type="button" onclick="showSignup()">Create an account</button>
         </div>
       </div>
+
+      <div id="verifyView" style="display:none;">
+        <h2>Verify your email</h2>
+        <p class="auth-sub">Enter the 6-digit code sent to <strong id="verifyEmailLabel"></strong> to activate your account.</p>
+        <div id="verifyDemoBanner" class="verify-code-banner">Check your inbox (and spam folder) for the code.</div>
+        <form class="auth-form active" onsubmit="verifyEmail(event)">
+          <label for="verifyCodeInput">Verification Code</label>
+          <input id="verifyCodeInput" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="123456" required>
+
+          <button class="btn btn-primary" style="width:100%;" type="submit">Verify Email</button>
+          <div id="verifyNotice" class="notice"></div>
+        </form>
+        <div class="auth-switch">Didn't get a code?
+          <button class="text-btn" type="button" onclick="resendVerification()">Resend code</button>
+        </div>
+        <div class="auth-switch">
+          <button class="text-btn" type="button" onclick="cancelVerification()">Use a different account</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -625,6 +800,7 @@
     <div class="container dash-main">
       <div class="dash-welcome">
         <span id="dashRole" class="profile-badge"></span>
+        <span class="profile-badge" style="background:#dcfce7;color:#166534;">✓ Email Verified</span>
         <h1 id="dashTitle">Welcome to BizSolve</h1>
         <p id="dashSubtitle" style="color:var(--muted);font-size:1.1rem;"></p>
       </div>
@@ -658,3 +834,300 @@
 
 </body>
 </html>
+# BizSolve
+
+A site where business owners post problems and problem solvers find them,
+with real email-verified signup.
+
+```
+bizsolve/
+  index.html      ← the whole site (frontend)
+  api/            ← backend: signup, login, email verification
+```
+
+This repo is set up so that **pushing to GitHub is the only deploy step**
+you ever take — GitHub Pages and Render both watch this repo and
+redeploy automatically. (GitHub itself can only serve static files like
+`index.html` — it can't run a Node server, which is why the backend is
+hosted on Render, but it stays wired to this same repo.)
+
+## One-time setup
+
+### 1. Push this repo to GitHub
+
+```bash
+cd bizsolve
+git init
+git add .
+git commit -m "Initial commit"
+git branch -M main
+git remote add origin https://github.com/YOUR-USERNAME/bizsolve.git
+git push -u origin main
+```
+
+(Create the empty repo on github.com first, then run the commands above.)
+
+### 2. Turn on GitHub Pages (hosts index.html)
+
+In your repo on GitHub: **Settings → Pages → Source: Deploy from a branch
+→ Branch: `main`, folder: `/ (root)` → Save.**
+
+GitHub gives you a URL like `https://YOUR-USERNAME.github.io/bizsolve/`.
+From now on, every push to `main` updates the live site automatically.
+
+### 3. Deploy the backend on Render (hosts /api)
+
+1. Go to https://render.com → **New → Web Service**
+2. Connect your GitHub account and pick this `bizsolve` repo
+3. Set **Root Directory** to `api`
+4. Build command: `npm install` — Start command: `npm start`
+5. Under **Environment**, add the three variables from `api/.env.example`:
+   - `RESEND_API_KEY` — get one free at https://resend.com
+   - `FROM_EMAIL` — `BizSolve <onboarding@resend.dev>` works for testing
+   - `JWT_SECRET` — any long random string
+6. Click **Create Web Service**. Render gives you a URL like
+   `https://bizsolve-api.onrender.com`.
+
+From now on, every push to `main` redeploys the backend automatically too.
+
+### 4. Point the frontend at your backend
+
+Open `index.html`, find this line near the top of the `<script>` section:
+
+```js
+const API_BASE_URL = 'https://YOUR-BACKEND-URL.onrender.com';
+```
+
+Replace it with the real Render URL from step 3, then:
+
+```bash
+git add index.html
+git commit -m "Connect frontend to live backend"
+git push
+```
+
+GitHub Pages redeploys the site with the fix in about a minute.
+
+## After setup
+
+Every future change is the same loop:
+
+```bash
+git add .
+git commit -m "describe the change"
+git push
+```
+
+Both the site and the API redeploy on their own — nothing else to run.
+
+## Known limitations to fix before real users sign up
+
+- `api/data.json` is a flat file, not a real database — swap in Postgres
+  or MongoDB before this holds real accounts.
+- Business problems are still stored in the browser's localStorage, not
+  the backend — only the account/verification system is server-backed
+  so far. Ask Claude to move problems into the API too when you're ready.
+node_modules/
+.env
+api/data.json
+.DS_Store
+# Get a free API key at https://resend.com after signing up
+RESEND_API_KEY=your_resend_api_key_here
+
+# You can use onboarding@resend.dev for testing without owning a domain.
+# Once you verify your own domain in Resend, switch to something like
+# "BizSolve <noreply@yourdomain.com>"
+FROM_EMAIL=BizSolve <onboarding@resend.dev>
+
+# Any long random string — used to sign login sessions (JWTs)
+JWT_SECRET=replace-with-a-long-random-string
+
+PORT=3001
+{
+  "name": "bizsolve-api",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Minimal backend for BizSolve: real signup/login/email-verification.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "resend": "^3.4.0",
+    "dotenv": "^16.4.5"
+  }
+}
+import express from 'express';
+import cors from 'cors';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import { Resend } from 'resend';
+import fs from 'fs';
+import 'dotenv/config';
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const resend = new Resend(process.env.RESEND_API_KEY);
+const JWT_SECRET = process.env.JWT_SECRET || 'change-this-in-production';
+const FROM_EMAIL = process.env.FROM_EMAIL || 'BizSolve <onboarding@resend.dev>';
+const DB_FILE = './data.json';
+const CODE_TTL_MS = 15 * 60 * 1000; // 15 minutes
+
+// --- Tiny file-backed "database" for this demo. -----------------------
+// Swap this out for a real database (Postgres, MongoDB, etc.) before
+// putting this in front of real users — a JSON file has no concurrency
+// safety and everything on disk is unencrypted.
+function readDB() {
+  if (!fs.existsSync(DB_FILE)) return { users: [] };
+  return JSON.parse(fs.readFileSync(DB_FILE, 'utf-8'));
+}
+function writeDB(db) {
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+}
+
+function generateCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function publicUser(user) {
+  const { passwordHash, verificationCode, verificationExpires, ...safe } = user;
+  return safe;
+}
+
+async function sendVerificationEmail(to, code) {
+  await resend.emails.send({
+    from: FROM_EMAIL,
+    to,
+    subject: 'Verify your BizSolve email',
+    html: `
+      <div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;">
+        <h2 style="color:#2563eb;">Verify your email</h2>
+        <p>Your BizSolve verification code is:</p>
+        <p style="font-size:32px;font-weight:800;letter-spacing:4px;">${code}</p>
+        <p style="color:#64748b;">This code expires in 15 minutes. If you didn't request this, you can ignore this email.</p>
+      </div>
+    `
+  });
+}
+
+// --- Routes -------------------------------------------------------------
+
+app.post('/api/signup', async (req, res) => {
+  const { name, email, password, role } = req.body;
+  if (!name || !email || !password || !role) {
+    return res.status(400).json({ error: 'Missing required fields.' });
+  }
+  if (role !== 'owner' && role !== 'solver') {
+    return res.status(400).json({ error: 'Role must be "owner" or "solver".' });
+  }
+
+  const normalizedEmail = String(email).trim().toLowerCase();
+  const db = readDB();
+
+  if (db.users.some(u => u.email === normalizedEmail)) {
+    return res.status(409).json({ error: 'An account with this email already exists.' });
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+  const code = generateCode();
+
+  const user = {
+    id: Date.now().toString(),
+    name,
+    email: normalizedEmail,
+    role,
+    passwordHash,
+    verified: false,
+    verificationCode: code,
+    verificationExpires: Date.now() + CODE_TTL_MS,
+    createdAt: new Date().toISOString()
+  };
+
+  db.users.push(user);
+  writeDB(db);
+
+  try {
+    await sendVerificationEmail(user.email, code);
+  } catch (err) {
+    console.error('Failed to send verification email:', err);
+    return res.status(502).json({ error: 'Account created, but the verification email failed to send. Try resending it.' });
+  }
+
+  res.json({ message: 'Account created. Check your email for a verification code.' });
+});
+
+app.post('/api/verify', (req, res) => {
+  const { email, code } = req.body;
+  if (!email || !code) return res.status(400).json({ error: 'Email and code are required.' });
+
+  const db = readDB();
+  const user = db.users.find(u => u.email === String(email).trim().toLowerCase());
+
+  if (!user) return res.status(404).json({ error: 'Account not found.' });
+  if (user.verified) return res.json({ message: 'Already verified.' });
+  if (Date.now() > user.verificationExpires) {
+    return res.status(400).json({ error: 'That code expired. Request a new one.' });
+  }
+  if (user.verificationCode !== String(code).trim()) {
+    return res.status(400).json({ error: 'Incorrect code.' });
+  }
+
+  user.verified = true;
+  delete user.verificationCode;
+  delete user.verificationExpires;
+  writeDB(db);
+
+  const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+  res.json({ message: 'Email verified.', token, user: publicUser(user) });
+});
+
+app.post('/api/resend-code', async (req, res) => {
+  const { email } = req.body;
+  const db = readDB();
+  const user = db.users.find(u => u.email === String(email).trim().toLowerCase());
+
+  if (!user) return res.status(404).json({ error: 'Account not found.' });
+  if (user.verified) return res.json({ message: 'Already verified.' });
+
+  user.verificationCode = generateCode();
+  user.verificationExpires = Date.now() + CODE_TTL_MS;
+  writeDB(db);
+
+  try {
+    await sendVerificationEmail(user.email, user.verificationCode);
+  } catch (err) {
+    console.error('Failed to resend verification email:', err);
+    return res.status(502).json({ error: 'Could not send the email. Please try again.' });
+  }
+
+  res.json({ message: 'A new code has been sent.' });
+});
+
+app.post('/api/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
+
+  const db = readDB();
+  const user = db.users.find(u => u.email === String(email).trim().toLowerCase());
+
+  if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
+    return res.status(401).json({ error: 'Email or password is incorrect.' });
+  }
+
+  if (!user.verified) {
+    return res.status(403).json({ error: 'Please verify your email first.', needsVerification: true });
+  }
+
+  const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+  res.json({ token, user: publicUser(user) });
+});
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log(`BizSolve API running on port ${PORT}`));
